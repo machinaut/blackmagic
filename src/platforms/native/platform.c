@@ -95,10 +95,13 @@ int platform_init(void)
 			GPIO_CNF_OUTPUT_PUSHPULL,
 			LED_UART | LED_IDLE_RUN | LED_ERROR);
 
-	/* FIXME: This pin in intended to be input, but the TXS0108 fails
-	 * to release the device from reset if this floats. */
-	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_2_MHZ,
-			GPIO_CNF_OUTPUT_PUSHPULL, GPIO7);
+        if (platform_hwversion() == 0) { /* Original production build */
+            /* FIXME: This pin in intended to be input, but the TXS0108 fails
+             * to release the device from reset if this floats. */
+            gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_2_MHZ,
+                            GPIO_CNF_OUTPUT_PUSHPULL, GPIO7);
+        }
+
 	/* Enable SRST output. Original uses a NPN to pull down, so setting the
 	 * output HIGH asserts. Mini is directly connected so use open drain output
 	 * and set LOW to assert.
