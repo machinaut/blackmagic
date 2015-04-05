@@ -22,30 +22,38 @@
  * protocol loop.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <assert.h>
-
+#include "general.h"
 #include "gdb_if.h"
 #include "gdb_main.h"
 #include "jtagtap.h"
 #include "jtag_scan.h"
-
 #include "target.h"
+#include "exception.h"
+#include "gdb_packet.h"
+#include "morse.h"
 
 int
 main(int argc, char **argv)
 {
 #if defined(LIBFTDI)
-	assert(platform_init(argc, argv) == 0);
+	platform_init(argc, argv);
 #else
 	(void) argc;
 	(void) argv;
-	assert(platform_init() == 0);
+	platform_init();
 #endif
-	PLATFORM_SET_FATAL_ERROR_RECOVERY();
 
-	gdb_main();
+	while (true) {
+		volatile struct exception e;
+		TRY_CATCH(e, EXCEPTION_ALL) {
+			gdb_main();
+		}
+		if (e.type) {
+			gdb_putpacketz("EFF");
+			target_list_free();
+			morse("TARGET LOST.", 1);
+		}
+	}
 
 	/* Should never get here */
 	return 0;

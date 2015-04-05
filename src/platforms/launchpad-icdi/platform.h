@@ -1,29 +1,33 @@
+/*
+ * This file is part of the Black Magic Debug project.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 #ifndef __PLATFORM_H
 #define __PLATFORM_H
-
-#include <stdint.h>
-
-#include <setjmp.h>
-#include <alloca.h>
 
 #include <libopencm3/lm4f/gpio.h>
 #include <libopencm3/usb/usbd.h>
 
-#include "gdb_packet.h"
+#include "version.h"
 
-#define CDCACM_PACKET_SIZE 	64
-#define BOARD_IDENT             "Black Magic Probe (Launchpad ICDI), (Firmware 1.5" VERSION_SUFFIX ", build " BUILDDATE ")"
-#define BOARD_IDENT_DFU		"Black Magic (Upgrade) for Launchpad, (Firmware 1.5" VERSION_SUFFIX ", build " BUILDDATE ")"
+#define BOARD_IDENT             "Black Magic Probe (Launchpad ICDI), (Firmware " FIRMWARE_VERSION ")"
+#define BOARD_IDENT_DFU		"Black Magic (Upgrade) for Launchpad, (Firmware " FIRMWARE_VERSION ")"
 #define DFU_IDENT               "Black Magic Firmware Upgrade (Launchpad)"
 #define DFU_IFACE_STRING	"lolwut"
 
-extern usbd_device *usbdev;
-#define CDCACM_GDB_ENDPOINT	1
-#define CDCACM_UART_ENDPOINT	3
-
-extern jmp_buf fatal_error_jmpbuf;
 extern uint8_t running_status;
-extern const char *morse_msg;
 extern volatile uint32_t timeout_counter;
 
 #define TMS_PORT	GPIOA_BASE
@@ -99,20 +103,7 @@ extern usbd_driver lm4f_usb_driver;
 #define SET_IDLE_STATE(state)	{}
 #define SET_ERROR_STATE(state)	SET_IDLE_STATE(state)
 
-#define PLATFORM_SET_FATAL_ERROR_RECOVERY()	{setjmp(fatal_error_jmpbuf);}
-#define PLATFORM_FATAL_ERROR(error) {			\
-	if( running_status ) gdb_putpacketz("X1D");	\
-		else gdb_putpacketz("EFF");		\
-	running_status = 0;				\
-	target_list_free();				\
-	morse("TARGET LOST.", 1);			\
-	longjmp(fatal_error_jmpbuf, (error));		\
-}
-
 #define PLATFORM_HAS_TRACESWO
-
-int platform_init(void);
-void morse(const char *msg, char repeat);
 
 inline static void gpio_set_val(uint32_t port, uint8_t pin, uint8_t val) {
 	gpio_write(port, pin, val == 0 ? 0 : 0xff);
@@ -122,16 +113,6 @@ inline static uint8_t gpio_get(uint32_t port, uint8_t pin) {
 	return !(gpio_read(port, pin) == 0);
 }
 
-void platform_delay(uint32_t delay);
-const char *platform_target_voltage(void);
-
-/* <cdcacm.c> */
-void cdcacm_init(void);
-/* Returns current usb configuration, or 0 if not configured. */
-int cdcacm_get_config(void);
-int cdcacm_get_dtr(void);
-
 #define disconnect_usb() do { usbd_disconnect(usbdev,1); nvic_disable_irq(USB_IRQ);} while(0)
-#define setup_vbus_irq()
 
 #endif

@@ -21,7 +21,6 @@
 #ifndef __PLATFORM_H
 #define __PLATFORM_H
 
-#include <stdint.h>
 #include <ftdi.h>
 
 #ifndef WIN32
@@ -37,17 +36,7 @@
 #define SET_IDLE_STATE(state)
 #define SET_ERROR_STATE(state)
 
-#define PLATFORM_FATAL_ERROR(error)	abort()
-#define PLATFORM_SET_FATAL_ERROR_RECOVERY()
-
-#define morse_msg 0
-
 extern struct ftdi_context *ftdic;
-
-int platform_init(int argc, char **argv);
-void morse(const char *msg, char repeat);
-const char *platform_target_voltage(void);
-void platform_delay(uint32_t delay);
 
 void platform_buffer_flush(void);
 int platform_buffer_write(const uint8_t *data, int size);

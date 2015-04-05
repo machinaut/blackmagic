@@ -22,10 +22,12 @@
  * implementation.
  */
 
-#include "platform.h"
+#include "general.h"
+#include "cdcacm.h"
+#include "usbuart.h"
+#include "morse.h"
 
 #include <libopencm3/stm32/f1/rcc.h>
-#include <libopencm3/cm3/systick.h>
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/stm32/exti.h>
@@ -33,19 +35,8 @@
 #include <libopencm3/usb/usbd.h>
 #include <libopencm3/stm32/f1/adc.h>
 
-#include "jtag_scan.h"
-#include <usbuart.h>
-
-#include <ctype.h>
-
-uint8_t running_status;
-volatile uint32_t timeout_counter;
-
-jmp_buf fatal_error_jmpbuf;
-
-static void morse_update(void);
-
 static void adc_init(void);
+static void setup_vbus_irq(void);
 
 /* Pins PB[7:5] are used to detect hardware revision.
  * 000 - Original production build.
@@ -64,7 +55,7 @@ int platform_hwversion(void)
 	return hwversion;
 }
 
-int platform_init(void)
+void platform_init(void)
 {
 	rcc_clock_setup_in_hse_8mhz_out_72mhz();
 
@@ -121,14 +112,6 @@ int platform_init(void)
 		              GPIO_CNF_INPUT_PULL_UPDOWN, PWR_BR_PIN);
 	}
 
-	/* Setup heartbeat timer */
-	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB_DIV8);
-	systick_set_reload(900000);	/* Interrupt us at 10 Hz */
-	SCB_SHPR(11) &= ~((15 << 4) & 0xff);
-	SCB_SHPR(11) |= ((14 << 4) & 0xff);
-	systick_interrupt_enable();
-	systick_counter_enable();
-
 	if (platform_hwversion() > 0) {
 		adc_init();
 	} else {
@@ -139,18 +122,10 @@ int platform_init(void)
 	/* Relocate interrupt vector table here */
 	SCB_VTOR = 0x2000;
 
+	platform_timing_init();
 	cdcacm_init();
 	usbuart_init();
-
-	/* Set recovery point */
-	if (setjmp(fatal_error_jmpbuf)) {
-		/* Do nothing on failure */
-		return 0;
-	}
-
-	jtag_scan(NULL);
-
-	return 0;
+	setup_vbus_irq();
 }
 
 void platform_srst_set_val(bool assert)
@@ -161,109 +136,20 @@ void platform_srst_set_val(bool assert)
 		gpio_set_val(SRST_PORT, SRST_PIN, !assert);
 	}
 }
-bool platform_target_get_power(void) {
+
+bool platform_target_get_power(void)
+{
 	if (platform_hwversion() > 0) {
-		return gpio_get(PWR_BR_PORT, PWR_BR_PIN);
+		return !gpio_get(PWR_BR_PORT, PWR_BR_PIN);
   	}
-	return 1; /* 1 = Unpowered */
+	return 0;
 }
+
 void platform_target_set_power(bool power)
 {
 	if (platform_hwversion() > 0) {
 		gpio_set_val(PWR_BR_PORT, PWR_BR_PIN, !power);
 	}
-}
-void platform_delay(uint32_t delay)
-{
-	timeout_counter = delay;
-	while(timeout_counter);
-}
-
-void sys_tick_handler(void)
-{
-	if(running_status)
-		gpio_toggle(LED_PORT, LED_IDLE_RUN);
-
-	if(timeout_counter)
-		timeout_counter--;
-
-	morse_update();
-}
-
-
-/* Morse code patterns and lengths */
-static const struct {
-	uint16_t code;
-	uint8_t bits;
-} morse_letter[] = {
-	{        0b00011101,  8}, // 'A' .-
-	{    0b000101010111, 12}, // 'B' -...
-	{  0b00010111010111, 14}, // 'C' -.-.
-	{      0b0001010111, 10}, // 'D' -..
-	{            0b0001,  4}, // 'E' .
-	{    0b000101110101, 12}, // 'F' ..-.
-	{    0b000101110111, 12}, // 'G' --.
-	{      0b0001010101, 10}, // 'H' ....
-	{          0b000101,  6}, // 'I' ..
-	{0b0001110111011101, 16}, // 'J' .---
-	{    0b000111010111, 12}, // 'K' -.-
-	{    0b000101011101, 12}, // 'L' .-..
-	{      0b0001110111, 10}, // 'M' --
-	{        0b00010111,  8}, // 'N' -.
-	{  0b00011101110111, 14}, // 'O' ---
-	{  0b00010111011101, 14}, // 'P' .--.
-	{0b0001110101110111, 16}, // 'Q' --.-
-	{      0b0001011101, 10}, // 'R' .-.
-	{        0b00010101,  8}, // 'S' ...
-	{          0b000111,  6}, // 'T' -
-	{      0b0001110101, 10}, // 'U' ..-
-	{    0b000111010101, 12}, // 'V' ...-
-	{    0b000111011101, 12}, // 'W' .--
-	{  0b00011101010111, 14}, // 'X' -..-
-	{0b0001110111010111, 16}, // 'Y' -.--
-	{  0b00010101110111, 14}, // 'Z' --..
-};
-
-
-const char *morse_msg;
-static const char * volatile morse_ptr;
-static char morse_repeat;
-
-void morse(const char *msg, char repeat)
-{
-	morse_msg = morse_ptr = msg;
-	morse_repeat = repeat;
-	SET_ERROR_STATE(0);
-}
-
-static void morse_update(void)
-{
-	static uint16_t code;
-	static uint8_t bits;
-
-	if(!morse_ptr) return;
-
-	if(!bits) {
-		char c = *morse_ptr++;
-		if(!c) {
-			if(morse_repeat) {
-				morse_ptr = morse_msg;
-				c = *morse_ptr++;
-			} else {
-				morse_ptr = 0;
-				return;
-			}
-		}
-		if((c >= 'A') && (c <= 'Z')) {
-			c -= 'A';
-			code = morse_letter[c].code;
-			bits = morse_letter[c].bits;
-		} else {
-			code = 0; bits = 4;
-		}
-	}
-	SET_ERROR_STATE(code & 1);
-	code >>= 1; bits--;
 }
 
 static void adc_init(void)
@@ -311,8 +197,12 @@ const char *platform_target_voltage(void)
 	return ret;
 }
 
-void assert_boot_pin(void)
+void platform_request_boot(void)
 {
+	/* Disconnect USB cable */
+	gpio_set_mode(USB_PU_PORT, GPIO_MODE_INPUT, 0, USB_PU_PIN);
+
+	/* Drive boot request pin */
 	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ,
 			GPIO_CNF_OUTPUT_PUSHPULL, GPIO12);
 	gpio_clear(GPIOB, GPIO12);
@@ -333,7 +223,7 @@ void exti15_10_isr(void)
 	exti_reset_request(USB_VBUS_PIN);
 }
 
-void setup_vbus_irq(void)
+static void setup_vbus_irq(void)
 {
 	nvic_set_priority(USB_VBUS_IRQ, IRQ_PRI_USB_VBUS);
 	nvic_enable_irq(USB_VBUS_IRQ);
@@ -351,3 +241,4 @@ void setup_vbus_irq(void)
 
 	exti15_10_isr();
 }
+

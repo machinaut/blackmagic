@@ -22,26 +22,18 @@
  * implementation.
  */
 
-#include "platform.h"
+#include "general.h"
+#include "cdcacm.h"
+#include "usbuart.h"
+
 #include <libopencm3/stm32/f1/rcc.h>
-#include <libopencm3/cm3/systick.h>
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/usb/usbd.h>
 #include <libopencm3/stm32/f1/adc.h>
 
-#include "jtag_scan.h"
-#include <usbuart.h>
-
-#include <ctype.h>
-
-uint8_t running_status;
-volatile uint32_t timeout_counter;
-
-jmp_buf fatal_error_jmpbuf;
-
-int platform_init(void)
+void platform_init(void)
 {
 	uint32_t data;
 	rcc_clock_setup_in_hse_8mhz_out_72mhz();
@@ -74,7 +66,7 @@ int platform_init(void)
 			GPIO_CNF_INPUT_PULL_UPDOWN, NRST_PIN);
 
 	gpio_set_mode(LED_PORT, GPIO_MODE_OUTPUT_2_MHZ,
-			GPIO_CNF_OUTPUT_PUSHPULL, led_idle_run);
+			GPIO_CNF_OUTPUT_PUSHPULL, LED_IDLE_RUN);
 
 	/* Remap TIM2 TIM2_REMAP[1]
 	 * TIM2_CH1_ETR -> PA15 (TDI, set as output above)
@@ -85,51 +77,11 @@ int platform_init(void)
 	data |=  AFIO_MAPR_TIM2_REMAP_PARTIAL_REMAP1;
 	AFIO_MAPR = data;
 
-	/* Setup heartbeat timer */
-	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB_DIV8);
-	systick_set_reload(900000);	/* Interrupt us at 10 Hz */
-	SCB_SHPR(11) &= ~((15 << 4) & 0xff);
-	SCB_SHPR(11) |= ((14 << 4) & 0xff);
-	systick_interrupt_enable();
-	systick_counter_enable();
-
-	usbuart_init();
-
 	SCB_VTOR = 0x2000;	// Relocate interrupt vector table here
 
+	platform_timing_init();
 	cdcacm_init();
-
-	// Set recovery point
-	if (setjmp(fatal_error_jmpbuf)) {
-		return 0; // Do nothing on failure
-	}
-
-	jtag_scan(NULL);
-
-	return 0;
-}
-
-void platform_delay(uint32_t delay)
-{
-	timeout_counter = delay;
-	while(timeout_counter);
-}
-
-void sys_tick_handler(void)
-{
-	if(running_status)
-		gpio_toggle(LED_PORT, led_idle_run);
-
-	if(timeout_counter)
-		timeout_counter--;
-}
-
-const char *morse_msg;
-
-void morse(const char *msg, char repeat)
-{
-	(void)repeat;
-	morse_msg = msg;
+	usbuart_init();
 }
 
 const char *platform_target_voltage(void)
@@ -137,7 +89,7 @@ const char *platform_target_voltage(void)
 	return "unknown";
 }
 
-void disconnect_usb(void)
+void platform_request_boot(void)
 {
 	/* Disconnect USB cable by resetting USB Device and pulling USB_DP low*/
 	rcc_periph_reset_pulse(RST_USB);
@@ -146,10 +98,8 @@ void disconnect_usb(void)
 	gpio_clear(GPIOA, GPIO12);
 	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_2_MHZ,
 		GPIO_CNF_OUTPUT_OPENDRAIN, GPIO12);
-}
 
-void assert_boot_pin(void)
-{
+	/* Assert bootloader pin */
 	uint32_t crl = GPIOA_CRL;
 	rcc_periph_clock_enable(RCC_GPIOA);
 	/* Enable Pull on GPIOA1. We don't rely on the external pin
@@ -160,4 +110,4 @@ void assert_boot_pin(void)
 	crl |= 0x80;
 	GPIOA_CRL = crl;
 }
-void setup_vbus_irq(void){};
+

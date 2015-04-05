@@ -17,14 +17,12 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-#include "platform.h"
+#include "general.h"
 #include "gdb_if.h"
-#include "jtag_scan.h"
+#include "version.h"
 
-#include <stdio.h>
-#include <string.h>
 #include <assert.h>
-#include <unistd.h>
+#include <sys/time.h>
 
 struct ftdi_context *ftdic;
 
@@ -121,11 +119,11 @@ static struct cable_desc_s {
 	},
 };
 
-int platform_init(int argc, char **argv)
+void platform_init(int argc, char **argv)
 {
 	int err;
 	int c;
-	int index = 0;
+	unsigned index = 0;
 	char *serial = NULL;
 	char * cablename =  "ftdi";
 	uint8_t ftdi_init[9] = {TCK_DIVISOR, 0x01, 0x00, SET_BITS_LOW, 0,0,
@@ -149,7 +147,7 @@ int platform_init(int argc, char **argv)
 
 	if (index == sizeof(cable_desc)/sizeof(cable_desc[0])){
 		fprintf(stderr, "No cable matching %s found\n",cablename);
-		return -1;
+		exit(-1);
 	}
 
 	if (cable_desc[index].dbus_data)
@@ -160,6 +158,11 @@ int platform_init(int argc, char **argv)
 		ftdi_init[7]= cable_desc[index].cbus_data;
 	if(cable_desc[index].cbus_ddr)
 		ftdi_init[8]= cable_desc[index].cbus_ddr;
+
+	printf("\nBlack Magic Probe (" FIRMWARE_VERSION ")\n");
+	printf("Copyright (C) 2015  Black Sphere Technologies Ltd.\n");
+	printf("License GPLv3+: GNU GPL version 3 or later "
+	       "<http://gnu.org/licenses/gpl.html>\n\n");
 
 	if(ftdic) {
 		ftdi_usb_close(ftdic);
@@ -212,12 +215,7 @@ int platform_init(int argc, char **argv)
 	}
 
 	assert(ftdi_write_data(ftdic, ftdi_init, 9) == 9);
-
 	assert(gdb_if_init() == 0);
-
-	jtag_scan(NULL);
-
-	return 0;
 }
 
 void platform_buffer_flush(void)
@@ -267,11 +265,21 @@ void platform_delay(uint32_t delay)
 	usleep(delay * 100000);
 }
 
-void morse(const char *msg, char repeat)
+static uint32_t timeout_time;
+static uint32_t time_ms(void)
 {
-	(void)repeat;
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+}
 
-	if (msg != NULL)
-		fprintf(stderr,"%s\n", msg);
+void platform_timeout_set(uint32_t ms)
+{
+	timeout_time = time_ms() + ms;
+}
+
+bool platform_timeout_is_expired(void)
+{
+	return time_ms() > timeout_time;
 }
 

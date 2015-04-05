@@ -2,6 +2,7 @@ CROSS_COMPILE ?= arm-none-eabi-
 CC = $(CROSS_COMPILE)gcc
 OBJCOPY = $(CROSS_COMPILE)objcopy
 
+OPT_FLAGS = -Os
 CFLAGS += -mcpu=cortex-m3 -mthumb \
 	-DSTM32F1 -DDISCOVERY_STLINK -I../libopencm3/include \
 	-I platforms/stm32
@@ -15,32 +16,20 @@ LDFLAGS = $(LDFLAGS_BOOT) -Wl,-Ttext=0x8002000
 VPATH += platforms/stm32
 
 SRC += 	cdcacm.c	\
-	platform.c	\
-	usbuart.c \
+	usbuart.c 	\
+	serialno.c	\
+	timing.c	\
 
 all:	blackmagic.bin blackmagic_dfu.bin blackmagic_dfu.hex dfu_upgrade.bin dfu_upgrade.hex
 
-blackmagic.bin:	blackmagic
-	$(OBJCOPY) -O binary $^ $@
-
 blackmagic_dfu: usbdfu.o dfucore.o dfu_f1.o
-	$(CC) $^ -o $@ $(LDFLAGS_BOOT)
-
-blackmagic_dfu.bin:	blackmagic_dfu
-	$(OBJCOPY) -O binary $^ $@
-
-blackmagic_dfu.hex:	blackmagic_dfu
-	$(OBJCOPY) -O ihex $^ $@
+	@echo "  LD      $@"
+	$(Q)$(CC) $^ -o $@ $(LDFLAGS_BOOT)
 
 dfu_upgrade: dfu_upgrade.o dfucore.o dfu_f1.o
-	$(CC) $^ -o $@ $(LDFLAGS)
-
-dfu_upgrade.bin:	dfu_upgrade
-	$(OBJCOPY) -O binary $^ $@
-
-dfu_upgrade.hex:	dfu_upgrade
-	$(OBJCOPY) -O ihex $^ $@
+	@echo "  LD      $@"
+	$(Q)$(CC) $^ -o $@ $(LDFLAGS)
 
 host_clean:
-	-rm blackmagic.bin blackmagic_dfu blackmagic_dfu.bin blackmagic_dfu.hex dfu_upgrade dfu_upgrade.bin dfu_upgrade.hex
+	-$(Q)$(RM) blackmagic.bin blackmagic_dfu blackmagic_dfu.bin blackmagic_dfu.hex dfu_upgrade dfu_upgrade.bin dfu_upgrade.hex
 

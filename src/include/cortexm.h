@@ -1,5 +1,25 @@
+/*
+ * This file is part of the Black Magic Debug project.
+ *
+ * Copyright (C) 2015 Gareth McMullin <gareth@blacksphere.co.nz>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 #ifndef __CORTEXM_H
 #define __CORTEXM_H
+
+#include "target.h"
 
 /* Private peripheral bus base address */
 #define CORTEXM_PPB_BASE	0xE0000000
@@ -123,9 +143,11 @@
 #define CORTEXM_DWT_FUNC_FUNC_WRITE	(6 << 0)
 #define CORTEXM_DWT_FUNC_FUNC_ACCESS	(7 << 0)
 
-bool cortexm_attach(struct target_s *target);
-void cortexm_detach(struct target_s *target);
-void cortexm_halt_resume(struct target_s *target, bool step);
+bool cortexm_attach(target *t);
+void cortexm_detach(target *t);
+void cortexm_halt_resume(target *t, bool step);
+int cortexm_run_stub(target *t, uint32_t loadaddr,
+                     uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3);
 
 #endif
 

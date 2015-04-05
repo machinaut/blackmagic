@@ -21,22 +21,34 @@
 /* This file implements TI/LMI LM3S target specific functions providing
  * the XML memory map and Flash memory programming.
  *
- * Issues:
- * No detection of the target device.
- * Add reference to documentation.
- * Flash erase is very slow.
+ * According to: TivaTM TM4C123GH6PM Microcontroller Datasheet
  */
 
-#include <stdlib.h>
-#include <string.h>
-
 #include "general.h"
-#include "adiv5.h"
 #include "target.h"
+#include "cortexm.h"
 
-static int lmi_flash_erase(struct target_s *target, uint32_t addr, int len);
-static int lmi_flash_write(struct target_s *target, uint32_t dest,
-			  const uint8_t *src, int len);
+#define SRAM_BASE            0x20000000
+#define STUB_BUFFER_BASE     (SRAM_BASE + 0x30)
+
+#define BLOCK_SIZE           0x400
+
+#define LMI_SCB_BASE         0x400FE000
+#define LMI_SCB_DID1         (LMI_SCB_BASE + 0x004)
+
+#define LMI_FLASH_BASE       0x400FD000
+#define LMI_FLASH_FMA        (LMI_FLASH_BASE + 0x000)
+#define LMI_FLASH_FMC        (LMI_FLASH_BASE + 0x008)
+
+#define LMI_FLASH_FMC_WRITE  (1 << 0)
+#define LMI_FLASH_FMC_ERASE  (1 << 1)
+#define LMI_FLASH_FMC_MERASE (1 << 2)
+#define LMI_FLASH_FMC_COMT   (1 << 3)
+#define LMI_FLASH_FMC_WRKEY  0xA4420000
+
+static int lmi_flash_erase(target *t, uint32_t addr, size_t len);
+static int lmi_flash_write(target *t, uint32_t dest,
+			  const uint8_t *src, size_t len);
 
 static const char lmi_driver_str[] = "TI Stellaris/Tiva";
 
@@ -64,112 +76,58 @@ static const char tm4c123gh6pm_xml_memory_map[] = "<?xml version=\"1.0\"?>"
 
 
 static const uint16_t lmi_flash_write_stub[] = {
-// _start:
-	0x4809,	// ldr r0, [pc, #36] // _flashbase
-	0x490b,	// ldr r1, [pc, #44] // _addr
-	0x467a, // mov r2, pc
-	0x3230, // adds r2, #48
-	0x4b0a, // ldr r3, [pc, #40] // _size
-	0x4d08, // ldr r5, [pc, #32] // _flash_write_cmd
-// _next:
- 	0xb15b, // cbz r3, _done
-	0x6001, // str r1, [r0, #0]
-	0x6814, // ldr r4, [r2]
-	0x6044, // str r4, [r0, #4]
-	0x6085, // str r5, [r0, #8]
-// _wait:
-	0x6884, // ldr r4, [r0, #8]
-	0x2601, // movs r6, #1
-	0x4234, // tst r4, r6
-	0xd1fb, // bne _wait
-
-	0x3b01, // subs r3, #1
-	0x3104, // adds r1, #4
-	0x3204, // adds r2, #4
-	0xe7f2, // b _next
-// _done:
-	0xbe00, // bkpt
-// _flashbase:
- 	0xd000, 0x400f, // .word 0x400fd000
-// _flash_write_cmd:
- 	0x0001, 0xa442, // .word 0xa4420001
-// _addr:
-// 	0x0000, 0x0000,
-// _size:
-// 	0x0000, 0x0000,
-// _data:
-// 	...
+#include "../flashstub/lmi.stub"
 };
 
-bool lmi_probe(struct target_s *target)
+bool lmi_probe(target *t)
 {
-	uint32_t did1 = adiv5_ap_mem_read(adiv5_target_ap(target), 0x400FE004);
+	uint32_t did1 = target_mem_read32(t, LMI_SCB_DID1);
 	switch (did1 >> 16) {
 	case 0x1049:	/* LM3S3748 */
-		target->driver = lmi_driver_str;
-		target->xml_mem_map = lmi_xml_memory_map;
-		target->flash_erase = lmi_flash_erase;
-		target->flash_write = lmi_flash_write;
+		t->driver = lmi_driver_str;
+		t->xml_mem_map = lmi_xml_memory_map;
+		t->flash_erase = lmi_flash_erase;
+		t->flash_write = lmi_flash_write;
 		return true;
 
 	case 0x10A1:	/* TM4C123GH6PM */
-		target->driver = lmi_driver_str;
-		target->xml_mem_map = tm4c123gh6pm_xml_memory_map;
-		target->flash_erase = lmi_flash_erase;
-		target->flash_write = lmi_flash_write;
+		t->driver = lmi_driver_str;
+		t->xml_mem_map = tm4c123gh6pm_xml_memory_map;
+		t->flash_erase = lmi_flash_erase;
+		t->flash_write = lmi_flash_write;
 		return true;
 	}
 	return false;
 }
 
-int lmi_flash_erase(struct target_s *target, uint32_t addr, int len)
+int lmi_flash_erase(target *t, uint32_t addr, size_t len)
 {
-	ADIv5_AP_t *ap = adiv5_target_ap(target);
-	uint32_t tmp;
-
-	addr &= 0xFFFFFC00;
-	len &= 0xFFFFFC00;
-
-	/* setup word access */
-	adiv5_ap_write(ap, 0x00, 0xA2000052);
-
-	/* select Flash Control */
-	adiv5_dp_low_access(ap->dp, 1, 0, 0x04, 0x400FD000);
+	addr &= ~(BLOCK_SIZE - 1);
+	len &= ~(BLOCK_SIZE - 1);
 
 	while(len) {
-		/* write address to FMA */
-		adiv5_ap_write(ap, 0x10, addr); /* Required to switch banks */
-		/* set ERASE bit in FMC */
-		adiv5_dp_low_access(ap->dp, 1, 0, 0x08, 0xA4420002);
-		/* Read FMC to poll for ERASE bit */
-		adiv5_dp_low_access(ap->dp, 1, 1, 0x08, 0);
-		do {
-			tmp = adiv5_dp_low_access(ap->dp, 1, 1, 0x08, 0);
-		} while (tmp & 2);
+		target_mem_write32(t, LMI_FLASH_FMA, addr);
+		target_mem_write32(t, LMI_FLASH_FMC,
+		                   LMI_FLASH_FMC_WRKEY | LMI_FLASH_FMC_ERASE);
+		while (target_mem_read32(t, LMI_FLASH_FMC) &
+		       LMI_FLASH_FMC_ERASE);
 
-		len -= 0x400;
-		addr += 0x400;
+		len -= BLOCK_SIZE;
+		addr += BLOCK_SIZE;
 	}
 	return 0;
 }
 
-int lmi_flash_write(struct target_s *target, uint32_t dest,
-			  const uint8_t *src, int len)
+int lmi_flash_write(target *t, uint32_t dest, const uint8_t *src, size_t len)
 {
 	uint32_t data[(len>>2)+2];
 	data[0] = dest;
 	data[1] = len >> 2;
 	memcpy(&data[2], src, len);
-	DEBUG("Sending stub\n");
-	target_mem_write_words(target, 0x20000000, (void*)lmi_flash_write_stub, 0x30);
-	DEBUG("Sending data\n");
-	target_mem_write_words(target, 0x20000030, data, len + 8);
-	DEBUG("Running stub\n");
-	target_pc_write(target, 0x20000000);
-	target_halt_resume(target, 0);
-	DEBUG("Waiting for halt\n");
-	while(!target_halt_wait(target));
 
-	return 0;
+	target_mem_write(t, SRAM_BASE, lmi_flash_write_stub,
+	                 sizeof(lmi_flash_write_stub));
+	target_mem_write(t, STUB_BUFFER_BASE, data, len + 8);
+	return cortexm_run_stub(t, SRAM_BASE, 0, 0, 0, 0);
 }
 

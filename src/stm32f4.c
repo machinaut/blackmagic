@@ -30,12 +30,10 @@
  *    manual
  */
 
-#include <stdlib.h>
-#include <string.h>
-
 #include "general.h"
 #include "adiv5.h"
 #include "target.h"
+#include "cortexm.h"
 #include "command.h"
 #include "gdb_packet.h"
 
@@ -49,9 +47,9 @@ const struct command_s stm32f4_cmd_list[] = {
 };
 
 
-static int stm32f4_flash_erase(struct target_s *target, uint32_t addr, int len);
-static int stm32f4_flash_write(struct target_s *target, uint32_t dest,
-			const uint8_t *src, int len);
+static int stm32f4_flash_erase(target *t, uint32_t addr, size_t len);
+static int stm32f4_flash_write(target *t, uint32_t dest,
+                               const uint8_t *src, size_t len);
 
 static const char stm32f4_driver_str[] = "STM32F4xx";
 
@@ -123,49 +121,17 @@ static const char stm32f4_xml_memory_map[] = "<?xml version=\"1.0\"?>"
 
 /* This routine is uses word access.  Only usable on target voltage >2.7V */
 static const uint16_t stm32f4_flash_write_stub[] = {
-// _start:
-	0x480a,	// ldr r0, [pc, #40] // _flashbase
-	0x490b,	// ldr r1, [pc, #44] // _addr
-	0x467a, // mov r2, pc
-	0x3230, // adds r2, #48
-	0x4b0a, // ldr r3, [pc, #36] // _size
- 	0x4d07, // ldr r5, [pc, #28] // _cr
-// _next:
- 	0xb153, // cbz r3, _done
-	0x6105, // str r5, [r0, #16]
-	0x6814, // ldr r4, [r2]
-	0x600c, // str r4, [r1]
-// _wait:
-	0x89c4, // ldrb r4, [r0, #14]
-	0x2601, // movs r6, #1
-	0x4234, // tst r4, r6
-	0xd1fb, // bne _wait
-
-	0x3b04, // subs r3, #4
-	0x3104, // adds r1, #4
-	0x3204, // adds r2, #4
-	0xe7f3, // b _next
-// _done:
-	0xbe00, // bkpt
-	0x0000,
-// .org 0x28
-//_cr:
-	0x0201, 0x0000, //.word 0x00000201 (Value to write to FLASH_CR) */
-// _flashbase:
- 	0x3c00, 0x4002, // .word 0x40023c00 (FPEC_BASE)
-// _addr:
-// 	0x0000, 0x0000,
-// _size:
-// 	0x0000, 0x0000,
-// _data:
-// 	...
+#include "../flashstub/stm32f4.stub"
 };
 
-bool stm32f4_probe(struct target_s *target)
+#define SRAM_BASE 0x20000000
+#define STUB_BUFFER_BASE ALIGN(SRAM_BASE + sizeof(stm32f4_flash_write_stub), 4)
+
+bool stm32f4_probe(target *t)
 {
 	uint32_t idcode;
 
-	idcode = adiv5_ap_mem_read(adiv5_target_ap(target), DBGMCU_IDCODE);
+	idcode = target_mem_read32(t, DBGMCU_IDCODE);
 	switch(idcode & 0xFFF) {
 	case 0x411: /* Documented to be 0x413! This is what I read... */
 	case 0x413: /* F407VGT6 */
@@ -173,35 +139,34 @@ bool stm32f4_probe(struct target_s *target)
 	case 0x423: /* F401 B/C RM0368 Rev.3 */
 	case 0x431: /* F411     RM0383 Rev.4 */
 	case 0x433: /* F401 D/E RM0368 Rev.3 */
-		target->xml_mem_map = stm32f4_xml_memory_map;
-		target->driver = stm32f4_driver_str;
-		target->flash_erase = stm32f4_flash_erase;
-		target->flash_write = stm32f4_flash_write;
-		target_add_commands(target, stm32f4_cmd_list, "STM32F4");
+		t->xml_mem_map = stm32f4_xml_memory_map;
+		t->driver = stm32f4_driver_str;
+		t->flash_erase = stm32f4_flash_erase;
+		t->flash_write = stm32f4_flash_write;
+		target_add_commands(t, stm32f4_cmd_list, "STM32F4");
 		return true;
 	}
 	return false;
 }
 
-static void stm32f4_flash_unlock(ADIv5_AP_t *ap)
+static void stm32f4_flash_unlock(target *t)
 {
-	if (adiv5_ap_mem_read(ap, FLASH_CR) & FLASH_CR_LOCK) {
+	if (target_mem_read32(t, FLASH_CR) & FLASH_CR_LOCK) {
 		/* Enable FPEC controller access */
-		adiv5_ap_mem_write(ap, FLASH_KEYR, KEY1);
-		adiv5_ap_mem_write(ap, FLASH_KEYR, KEY2);
+		target_mem_write32(t, FLASH_KEYR, KEY1);
+		target_mem_write32(t, FLASH_KEYR, KEY2);
 	}
 }
 
-static int stm32f4_flash_erase(struct target_s *target, uint32_t addr, int len)
+static int stm32f4_flash_erase(target *t, uint32_t addr, size_t len)
 {
-	ADIv5_AP_t *ap = adiv5_target_ap(target);
 	uint16_t sr;
 	uint32_t cr;
 	uint32_t pagesize;
 
 	addr &= 0x07FFC000;
 
-	stm32f4_flash_unlock(ap);
+	stm32f4_flash_unlock(t);
 
 	while(len) {
 		if (addr < 0x10000) { /* Sector 0..3 */
@@ -218,13 +183,13 @@ static int stm32f4_flash_erase(struct target_s *target, uint32_t addr, int len)
 		}
 		cr |= FLASH_CR_EOPIE | FLASH_CR_ERRIE | FLASH_CR_SER;
 		/* Flash page erase instruction */
-		adiv5_ap_mem_write(ap, FLASH_CR, cr);
+		target_mem_write32(t, FLASH_CR, cr);
 		/* write address to FMA */
-		adiv5_ap_mem_write(ap, FLASH_CR, cr | FLASH_CR_STRT);
+		target_mem_write32(t, FLASH_CR, cr | FLASH_CR_STRT);
 
 		/* Read FLASH_SR to poll for BSY bit */
-		while(adiv5_ap_mem_read(ap, FLASH_SR) & FLASH_SR_BSY)
-			if(target_check_error(target))
+		while(target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY)
+			if(target_check_error(t))
 				return -1;
 
 		len -= pagesize;
@@ -232,46 +197,30 @@ static int stm32f4_flash_erase(struct target_s *target, uint32_t addr, int len)
 	}
 
 	/* Check for error */
-	sr = adiv5_ap_mem_read(ap, FLASH_SR);
+	sr = target_mem_read32(t, FLASH_SR);
 	if(sr & SR_ERROR_MASK)
 		return -1;
 
 	return 0;
 }
 
-static int stm32f4_flash_write(struct target_s *target, uint32_t dest,
-			  const uint8_t *src, int len)
+static int stm32f4_flash_write(target *t, uint32_t dest,
+                               const uint8_t *src, size_t len)
 {
-	ADIv5_AP_t *ap = adiv5_target_ap(target);
 	uint32_t offset = dest % 4;
-	uint32_t words = (offset + len + 3) / 4;
-	uint32_t data[2 + words];
-	uint16_t sr;
+	uint8_t data[ALIGN(offset + len, 4)];
 
 	/* Construct data buffer used by stub */
-	data[0] = dest - offset;
-	data[1] = words * 4;		/* length must always be a multiple of 4 */
-	data[2] = 0xFFFFFFFF;		/* pad partial words with all 1s to avoid */
-	data[words + 1] = 0xFFFFFFFF;	/* damaging overlapping areas */
-	memcpy((uint8_t *)&data[2] + offset, src, len);
+	/* pad partial words with all 1s to avoid damaging overlapping areas */
+	memset(data, 0xff, sizeof(data));
+	memcpy((uint8_t *)data + offset, src, len);
 
-	/* Write stub and data to target ram and set PC */
-	target_mem_write_words(target, 0x20000000, (void*)stm32f4_flash_write_stub, 0x30);
-	target_mem_write_words(target, 0x20000030, data, sizeof(data));
-	target_pc_write(target, 0x20000000);
-	if(target_check_error(target))
-		return -1;
-
-	/* Execute the stub */
-	target_halt_resume(target, 0);
-	while(!target_halt_wait(target));
-
-	/* Check for error */
-	sr = adiv5_ap_mem_read(ap, FLASH_SR);
-	if(sr & SR_ERROR_MASK)
-		return -1;
-
-	return 0;
+	/* Write buffer to target ram call stub */
+	target_mem_write(t, SRAM_BASE, stm32f4_flash_write_stub,
+	                 sizeof(stm32f4_flash_write_stub));
+	target_mem_write(t, STUB_BUFFER_BASE, data, sizeof(data));
+	return cortexm_run_stub(t, SRAM_BASE, dest - offset,
+	                        STUB_BUFFER_BASE, sizeof(data), 0);
 }
 
 static bool stm32f4_cmd_erase_mass(target *t)
@@ -279,17 +228,15 @@ static bool stm32f4_cmd_erase_mass(target *t)
 	const char spinner[] = "|/-\\";
 	int spinindex = 0;
 
-	ADIv5_AP_t *ap = adiv5_target_ap(t);
-
 	gdb_out("Erasing flash... This may take a few seconds.  ");
-	stm32f4_flash_unlock(ap);
+	stm32f4_flash_unlock(t);
 
 	/* Flash mass erase start instruction */
-	adiv5_ap_mem_write(ap, FLASH_CR, FLASH_CR_MER);
-	adiv5_ap_mem_write(ap, FLASH_CR, FLASH_CR_STRT | FLASH_CR_MER);
+	target_mem_write32(t, FLASH_CR, FLASH_CR_MER);
+	target_mem_write32(t, FLASH_CR, FLASH_CR_STRT | FLASH_CR_MER);
 
 	/* Read FLASH_SR to poll for BSY bit */
-	while(adiv5_ap_mem_read(ap, FLASH_SR) & FLASH_SR_BSY) {
+	while (target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY) {
 		gdb_outf("\b%c", spinner[spinindex++ % 4]);
 		if(target_check_error(t)) {
 			gdb_out("\n");
@@ -299,7 +246,7 @@ static bool stm32f4_cmd_erase_mass(target *t)
 	gdb_out("\n");
 
 	/* Check for error */
-	uint16_t sr = adiv5_ap_mem_read(ap, FLASH_SR);
+	uint16_t sr = target_mem_read32(t, FLASH_SR);
 	if ((sr & SR_ERROR_MASK) || !(sr & SR_EOP))
 		return false;
 
@@ -308,31 +255,27 @@ static bool stm32f4_cmd_erase_mass(target *t)
 
 static bool stm32f4_option_write(target *t, uint32_t value)
 {
-	ADIv5_AP_t *ap = adiv5_target_ap(t);
-
-	adiv5_ap_mem_write(ap, FLASH_OPTKEYR, OPTKEY1);
-	adiv5_ap_mem_write(ap, FLASH_OPTKEYR, OPTKEY2);
+	target_mem_write32(t, FLASH_OPTKEYR, OPTKEY1);
+	target_mem_write32(t, FLASH_OPTKEYR, OPTKEY2);
 	value &= ~FLASH_OPTCR_RESERVED;
-	while(adiv5_ap_mem_read(ap, FLASH_SR) & FLASH_SR_BSY)
+	while (target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY)
 		if(target_check_error(t))
 			return -1;
 
 	/* WRITE option bytes instruction */
-	adiv5_ap_mem_write(ap, FLASH_OPTCR, value);
-	adiv5_ap_mem_write(ap, FLASH_OPTCR, value | FLASH_OPTCR_OPTSTRT);
+	target_mem_write32(t, FLASH_OPTCR, value);
+	target_mem_write32(t, FLASH_OPTCR, value | FLASH_OPTCR_OPTSTRT);
 	/* Read FLASH_SR to poll for BSY bit */
-	while(adiv5_ap_mem_read(ap, FLASH_SR) & FLASH_SR_BSY)
+	while(target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY)
 		if(target_check_error(t))
 			return false;
-	adiv5_ap_mem_write(ap, FLASH_OPTCR, value | FLASH_OPTCR_OPTLOCK);
+	target_mem_write32(t, FLASH_OPTCR, value | FLASH_OPTCR_OPTLOCK);
 	return true;
 }
 
 static bool stm32f4_cmd_option(target *t, int argc, char *argv[])
 {
 	uint32_t addr, val;
-
-	ADIv5_AP_t *ap = adiv5_target_ap(t);
 
 	if ((argc == 2) && !strcmp(argv[1], "erase")) {
 		stm32f4_option_write(t, 0x0fffaaed);
@@ -347,7 +290,7 @@ static bool stm32f4_cmd_option(target *t, int argc, char *argv[])
 
 	for (int i = 0; i < 0xf; i += 8) {
 		addr = 0x1fffC000 + i;
-		val = adiv5_ap_mem_read(ap, addr);
+		val = target_mem_read32(t, addr);
 		gdb_outf("0x%08X: 0x%04X\n", addr, val & 0xFFFF);
 	}
 	return true;

@@ -23,27 +23,23 @@
  */
 
 #include "general.h"
-#include "platform.h"
+#include "exception.h"
 #include "adiv5.h"
-
 #include "swdptap.h"
 #include "jtagtap.h"
-
 #include "command.h"
-
-#include <stdlib.h>
+#include "morse.h"
 
 #define SWDP_ACK_OK    0x01
 #define SWDP_ACK_WAIT  0x02
 #define SWDP_ACK_FAULT 0x04
 
-static void adiv5_swdp_write(ADIv5_DP_t *dp, uint8_t addr, uint32_t value);
-static uint32_t adiv5_swdp_read(ADIv5_DP_t *dp, uint8_t addr);
+static uint32_t adiv5_swdp_read(ADIv5_DP_t *dp, uint16_t addr);
 
 static uint32_t adiv5_swdp_error(ADIv5_DP_t *dp);
 
-static uint32_t adiv5_swdp_low_access(ADIv5_DP_t *dp, uint8_t APnDP, uint8_t RnW,
-				      uint8_t addr, uint32_t value);
+static uint32_t adiv5_swdp_low_access(ADIv5_DP_t *dp, uint8_t RnW,
+				      uint16_t addr, uint32_t value);
 
 
 int adiv5_swdp_scan(void)
@@ -68,7 +64,6 @@ int adiv5_swdp_scan(void)
 		return -1;
 	}
 
-	dp->dp_write = adiv5_swdp_write;
 	dp->dp_read = adiv5_swdp_read;
 	dp->error = adiv5_swdp_error;
 	dp->low_access = adiv5_swdp_low_access;
@@ -82,14 +77,15 @@ int adiv5_swdp_scan(void)
 	return target_list?1:0;
 }
 
-static void adiv5_swdp_write(ADIv5_DP_t *dp, uint8_t addr, uint32_t value)
+static uint32_t adiv5_swdp_read(ADIv5_DP_t *dp, uint16_t addr)
 {
-	adiv5_swdp_low_access(dp, ADIV5_LOW_DP, ADIV5_LOW_WRITE, addr, value);
-}
-
-static uint32_t adiv5_swdp_read(ADIv5_DP_t *dp, uint8_t addr)
-{
-	return adiv5_swdp_low_access(dp, ADIV5_LOW_DP, ADIV5_LOW_READ, addr, 0);
+	if (addr & ADIV5_APnDP) {
+		adiv5_dp_low_access(dp, ADIV5_LOW_READ, addr, 0);
+		return adiv5_dp_low_access(dp, ADIV5_LOW_READ,
+		                           ADIV5_DP_RDBUFF, 0);
+	} else {
+		return adiv5_swdp_low_access(dp, ADIV5_LOW_READ, addr, 0);
+	}
 }
 
 static uint32_t adiv5_swdp_error(ADIv5_DP_t *dp)
@@ -109,15 +105,17 @@ static uint32_t adiv5_swdp_error(ADIv5_DP_t *dp)
 	if(err & ADIV5_DP_CTRLSTAT_WDATAERR)
 		clr |= ADIV5_DP_ABORT_WDERRCLR;
 
-	adiv5_swdp_write(dp, ADIV5_DP_ABORT, clr);
+	adiv5_dp_write(dp, ADIV5_DP_ABORT, clr);
 	dp->fault = 0;
 
 	return err;
 }
 
-static uint32_t adiv5_swdp_low_access(ADIv5_DP_t *dp, uint8_t APnDP, uint8_t RnW,
-				      uint8_t addr, uint32_t value)
+static uint32_t adiv5_swdp_low_access(ADIv5_DP_t *dp, uint8_t RnW,
+				      uint16_t addr, uint32_t value)
 {
+	bool APnDP = addr & ADIV5_APnDP;
+	addr &= 0xff;
 	uint8_t request = 0x81;
 	uint32_t response;
 	uint8_t ack;
@@ -132,28 +130,26 @@ static uint32_t adiv5_swdp_low_access(ADIv5_DP_t *dp, uint8_t APnDP, uint8_t RnW
 	if((addr == 4) || (addr == 8))
 		request ^= 0x20;
 
-	size_t tries = 1000;
+	platform_timeout_set(2000);
 	do {
 		swdptap_seq_out(request, 8);
 		ack = swdptap_seq_in(3);
-	} while(--tries && ack == SWDP_ACK_WAIT);
+	} while (!platform_timeout_is_expired() && ack == SWDP_ACK_WAIT);
 
-	if (dp->allow_timeout && (ack == SWDP_ACK_WAIT))
-		return 0;
+	if (ack == SWDP_ACK_WAIT)
+		raise_exception(EXCEPTION_TIMEOUT, "SWDP ACK timeout");
 
 	if(ack == SWDP_ACK_FAULT) {
 		dp->fault = 1;
 		return 0;
 	}
 
-	if(ack != SWDP_ACK_OK) {
-		/* Fatal error if invalid ACK response */
-		PLATFORM_FATAL_ERROR(1);
-	}
+	if(ack != SWDP_ACK_OK)
+		raise_exception(EXCEPTION_ERROR, "SWDP invalid ACK");
 
 	if(RnW) {
 		if(swdptap_seq_in_parity(&response, 32))  /* Give up on parity error */
-			PLATFORM_FATAL_ERROR(1);
+			raise_exception(EXCEPTION_ERROR, "SWDP Parity error");
 	} else {
 		swdptap_seq_out_parity(value, 32);
 	}
